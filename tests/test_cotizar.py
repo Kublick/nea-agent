@@ -278,3 +278,36 @@ async def test_pasar_del_maximo_va_a_una_persona(respx_mock):
     assert rutas["handoff"].called
     assert "/cart/" not in json.loads(rutas["messages"].calls[-1].request.content)["text"]
     await ctx.crm.aclose()
+
+
+# --- la factura tiene que ser respuesta del lead (2026-11-13) -------------------
+
+
+def _runtime(ctx, lead, nea):
+    from app.state import Conversation
+    from app.tools import ToolRuntime
+    return ToolRuntime(ctx, Conversation(id=1, wa_identity="5216860000000"), CRM_CONV_ID,
+                       lead_reciente=lead, nea_ultimo=nea, etapas=[])
+
+
+async def test_un_si_a_dos_preguntas_no_contesta_la_factura(respx_mock):
+    # En vivo: «¿Confirmas la cotización? ¿Quieres factura?» → «Sí, así está bien».
+    ctx = _ctx()
+    rutas = _rutas(respx_mock)
+    rt = _runtime(ctx, "necesito 4 C3SS7-10B-20\nSí, así está bien",
+                  "¿Confirmas que la cotización sea 4 de ese modelo? ¿Quieres factura?")
+    r = await rt.execute("cotizar", {"lineas": [{"producto": "C3SS7-10B-20", "cantidad": 4}],
+                                     "confirmado": True, "requiere_cfdi": False})
+    assert r["error"] == "falta_cfdi" and "solo para eso" in r["detalle"]
+    assert not rutas["notes"].called
+    await ctx.crm.aclose()
+
+
+async def test_un_no_a_la_pregunta_sola_de_factura_si_contesta(respx_mock):
+    ctx = _ctx()
+    rutas = _rutas(respx_mock)
+    rt = _runtime(ctx, "necesito 3 C3SS7-10B-20\nsí\nno", "¿Requieres factura (CFDI)? Sí o no.")
+    r = await rt.execute("cotizar", {"lineas": [{"producto": "C3SS7-10B-20", "cantidad": 3}],
+                                     "confirmado": True, "requiere_cfdi": False})
+    assert r["ok"] is True and rutas["notes"].called
+    await ctx.crm.aclose()

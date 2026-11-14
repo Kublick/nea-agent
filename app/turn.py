@@ -450,6 +450,7 @@ async def run_turn(
         tz=tz,
         conversacion_reciente=_conversacion_reciente(history),
         lead_reciente="\n".join(str(m.content) for m in history if m.role == "user")[-2000:],
+        nea_ultimo=next((str(m.content) for m in reversed(history) if m.role == "assistant"), ""),
         etapas=etapas_siguientes(context),
     )
     try:

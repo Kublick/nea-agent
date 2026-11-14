@@ -352,6 +352,8 @@ ETAPA_CONSULTA = "Consulta de producto"
 ETAPA_COTIZACION = "Cotización pendiente"
 ETAPA_ENVIADA = "Cotización enviada"
 
+_HABLA_FACTURA = re.compile(r"factura|cfdi", re.IGNORECASE)
+
 # El lead pide una persona con sus palabras (ver `ToolRuntime._handoff`).
 _PIDE_PERSONA = re.compile(
     r"persona|humano|alguien|asesor|vendedor|ejecutivo|encargad|representante|"
@@ -589,11 +591,14 @@ class ToolRuntime:
         conversacion_reciente: str | None = None,
         etapas: list[str] | None = None,
         lead_reciente: str | None = None,
+        nea_ultimo: str = "",
     ) -> None:
         self._ctx = ctx
         # Lo que dijo el LEAD en lo reciente, sin lo que dijo Nea: para saber
         # si él pidió una persona (ver `_handoff`). None ⇒ no se revisa.
         self._lead_reciente = lead_reciente
+        # Lo último que dijo Nea (para saber si la factura fue su única pregunta).
+        self._nea_ultimo = nea_ultimo
         self._busco_en_la_tienda = False
         # 038 — A qué etapas puede mover al lead (`lead.nextStages`).
         self.etapas: list[str] = list(etapas or [])
@@ -1164,12 +1169,19 @@ class ToolRuntime:
         # El modelo se saltaba la pregunta y llenaba el campo a ojo (prueba en
         # vivo del 2026-11-13). Se exige que la factura se haya hablado en lo
         # último de la conversación, como `nombra_un_dia` con las fechas.
-        hablada = self._conversacion_reciente is None or re.search(
-            r"factura|cfdi", self._conversacion_reciente, re.IGNORECASE
-        )
-        if not isinstance(args.get("requiere_cfdi"), bool) or not hablada:
+        # Y que la respuesta sea de verdad suya: o el lead habló de la factura
+        # con sus palabras, o lo último de Nea fue SOLO esa pregunta. Con
+        # «¿confirmas la lista? ¿quieres factura?» un «sí» contesta la lista,
+        # no la factura (en vivo, el modelo la llenó a ojo).
+        if self._lead_reciente is None:
+            contestada = True
+        else:
+            pregunta_sola = bool(_HABLA_FACTURA.search(self._nea_ultimo)) and self._nea_ultimo.count("?") == 1
+            contestada = bool(_HABLA_FACTURA.search(self._lead_reciente)) or pregunta_sola
+        if not isinstance(args.get("requiere_cfdi"), bool) or not contestada:
             return {"ok": False, "error": "falta_cfdi",
-                    "detalle": "antes de cotizar pregúntale si requiere factura (CFDI), solo sí o no, y espera su respuesta"}
+                    "detalle": ("antes de cotizar pregúntale, en un mensaje solo para eso, si requiere "
+                                "factura (CFDI), sí o no, y espera su respuesta")}
         lineas = [
             (str((l or {}).get("producto") or "").strip(), (l or {}).get("cantidad"))
             for l in args.get("lineas") or []

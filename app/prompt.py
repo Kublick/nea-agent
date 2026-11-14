@@ -523,8 +523,9 @@ def build_system_prompt(
         lines.append(
             "- Si el lead quiere cotización o comprar: (1) arma la lista con "
             "buscar_inventario; (2) repítesela (producto y cantidad) y pregunta "
-            "«¿así está bien?»; (3) con su sí, pregúntale si requiere factura "
-            "(CFDI), solo sí o no — RFC y datos los pide la persona; (4) llama "
+            "«¿así está bien?»; (3) con su sí, en OTRO mensaje y como única "
+            "pregunta, pregúntale si requiere factura (CFDI), sí o no — RFC y "
+            "datos los pide la persona; (4) llama "
             "cotizar y haz lo que te diga su resultado: o una persona revisa "
             "su cotización, o va su enlace de compra. Tú nunca escribes un "
             "enlace de compra ni el total: cuando toca, se agregan solos."
