@@ -61,6 +61,16 @@ def _honest_failure(msg: InboundMessage) -> MediaPart:
         "sticker": "un sticker",
     }
     que = nombres.get(msg.type, "contenido")
+    if msg.type == "audio":
+        # Pedirle otra nota de voz a quien la nuestra no se oyó es mandarlo
+        # a fallar igual: se le pide por escrito (vocero-crm 067, Q25).
+        return MediaPart(
+            text=(
+                "[El lead mandó una nota de voz que NO pudiste escuchar."
+                " Sé honesta: dile «No pude escuchar tu audio, ¿me lo escribes?»"
+                " con tus palabras, y no supongas lo que decía.]"
+            )
+        )
     return MediaPart(
         text=(
             f"[El lead mandó {que} que NO pudiste abrir/procesar."
@@ -78,7 +88,11 @@ async def _audio(ctx: AppContext, msg: InboundMessage) -> MediaPart:
         return _honest_failure(msg)
     mime_clean = (mime or msg.media_mime or "audio/ogg").split(";")[0].strip()
     ext = _AUDIO_EXT.get(mime_clean, "ogg")
-    transcript = await ctx.llm.transcribe(
+    # vocero-crm 067 — Con STT_PROVIDER=modulate transcribe Modulate; si no,
+    # el modelo que oye del LLM. Un fallo de cualquiera sube y termina en el
+    # marcador honesto (describe_item): no se cae al otro.
+    transcriptor = ctx.stt or ctx.llm
+    transcript = await transcriptor.transcribe(
         data, mime_clean, filename=f"nota-de-voz.{ext}"
     )
     kind = "Nota de voz" if msg.media_voice else "Audio"

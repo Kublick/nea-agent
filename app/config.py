@@ -92,6 +92,19 @@ class Settings(BaseSettings):
     # Lo demás lo aprueba una persona. 0 = siempre aprueba una persona.
     compra_directa_max: float = 500.0
 
+    # Quién transcribe las notas de voz (vocero-crm 067, D15). Vacío = el
+    # modelo que oye del LLM (LLM_TRANSCRIBE_MODEL), como siempre.
+    # "modulate" = Velma de Modulate, con MODULATE_API_KEY.
+    stt_provider: str = ""
+    modulate_api_key: str = ""
+    # Vocabulario propio para Modulate, separado por comas: marcas y
+    # categorías de la tienda (lo que un STT general escribe mal).
+    modulate_terminos: str = ""
+
+    @property
+    def usa_modulate(self) -> bool:
+        return self.stt_provider.strip().lower() == "modulate" and bool(self.modulate_api_key.strip())
+
     @property
     def origen_del_carrito(self) -> str:
         origen = self.cart_link_origin.strip().rstrip("/")
