@@ -508,6 +508,17 @@ def build_system_prompt(
             "regresa e incluyen IVA. Si la tienda no responde o no encuentra "
             "el producto, dilo con honestidad y ofrece pasarlo con una persona."
         )
+        # En vivo (2026-11-13), con un historial donde Nea ya había ofrecido
+        # pasarlo con alguien, el modelo repitió la oferta en vez de buscar
+        # y tomó un «gracias» como que pidió una persona.
+        lines.append(
+            "- CADA VEZ que el lead pregunte por un producto o una pieza, busca "
+            "con buscar_inventario en ESE turno, aunque ya lo hayas buscado "
+            "antes o antes le hayas ofrecido pasarlo con alguien: lo que "
+            "dijiste antes no cuenta como búsqueda y las existencias cambian. "
+            "Por una pregunta de producto NO ofrezcas una persona sin haber "
+            "buscado primero."
+        )
     if inventario and profile.permite("cotizar"):
         lines.append(
             "- Si el lead quiere cotización o comprar: (1) arma la lista con "

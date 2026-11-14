@@ -223,3 +223,46 @@ async def test_sin_esa_etapa_adelante_no_se_mueve(respx_mock):
     await _turno(ctx)
     assert not stage.called
     await ctx.crm.aclose()
+
+
+# --- volver a preguntar por piezas (historial con ofertas de pasar a alguien) --
+
+
+async def _turno_handoff(respx_mock, texto, argumentos):
+    ctx = _ctx()
+    rutas = mock_crm_basics(respx_mock)
+    ctx.llm.replies = [
+        LlmReply(content=None, tool_calls=[ToolCall(id="h", name="handoff", arguments=argumentos)]),
+        LlmReply(content="Claro, ¿qué pieza buscas?"),
+    ]
+    await _turno(ctx, texto)
+    return ctx, rutas
+
+
+async def test_handoff_falso_se_rechaza_y_pide_buscar(respx_mock):
+    # En vivo: tras ofrecer «¿te paso con alguien?», el lead dijo «gracias» y
+    # el modelo hizo handoff «pidió humano». El lead no pidió a nadie.
+    ctx, rutas = await _turno_handoff(respx_mock, "gracias", {"reason": "pidió humano"})
+    resultado = json.loads(ctx.llm.calls[1]["messages"][-1]["content"])
+    assert resultado["error"] == "confirma_handoff" and "buscar_inventario" in resultado["detalle"]
+    assert not rutas["handoff"].called
+    assert "CADA VEZ que el lead pregunte por un producto" in ctx.llm.calls[0]["messages"][0]["content"]
+    await ctx.crm.aclose()
+
+
+async def test_si_el_lead_pide_una_persona_pasa(respx_mock):
+    ctx, rutas = await _turno_handoff(respx_mock, "quiero hablar con un asesor", {"reason": "pidió humano"})
+    assert rutas["handoff"].called
+    await ctx.crm.aclose()
+
+
+async def test_con_confirmado_pasa(respx_mock):
+    ctx, rutas = await _turno_handoff(respx_mock, "sí, por favor", {"reason": "pidió humano", "confirmado": True})
+    assert rutas["handoff"].called
+    await ctx.crm.aclose()
+
+
+async def test_otros_motivos_no_se_revisan(respx_mock):
+    ctx, rutas = await _turno_handoff(respx_mock, "eso no lo sé", {"reason": "duda fuera del conocimiento"})
+    assert rutas["handoff"].called
+    await ctx.crm.aclose()

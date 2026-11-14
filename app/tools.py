@@ -26,6 +26,7 @@ from app.crm import (
     CrmError,
     SlotNotOffered,
     SlotTaken,
+    canonical_handoff_reason,
 )
 from app.dias import nombra_un_dia
 from app.profile import BusinessProfile
@@ -200,7 +201,11 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "reason": {
                         "type": "string",
                         "description": "Motivo breve (p.ej. 'pidió humano', 'duda fuera del conocimiento')",
-                    }
+                    },
+                    "confirmado": {
+                        "type": "boolean",
+                        "description": "Solo si la herramienta te pidió confirmar: true si el lead de verdad quiere una persona (p. ej. aceptó tu oferta)",
+                    },
                 },
             },
         },
@@ -346,6 +351,13 @@ COTIZAR_SCHEMA: dict[str, Any] = {
 ETAPA_CONSULTA = "Consulta de producto"
 ETAPA_COTIZACION = "Cotización pendiente"
 ETAPA_ENVIADA = "Cotización enviada"
+
+# El lead pide una persona con sus palabras (ver `ToolRuntime._handoff`).
+_PIDE_PERSONA = re.compile(
+    r"persona|humano|alguien|asesor|vendedor|ejecutivo|encargad|representante|"
+    r"\bagente\b|hablar con|llamar|llámame|llamame|atiend[ae]",
+    re.IGNORECASE,
+)
 
 
 def con_inventario(schemas: list[dict[str, Any]], tienda: bool) -> list[dict[str, Any]]:
@@ -576,8 +588,13 @@ class ToolRuntime:
         tz: ZoneInfo | None = None,
         conversacion_reciente: str | None = None,
         etapas: list[str] | None = None,
+        lead_reciente: str | None = None,
     ) -> None:
         self._ctx = ctx
+        # Lo que dijo el LEAD en lo reciente, sin lo que dijo Nea: para saber
+        # si él pidió una persona (ver `_handoff`). None ⇒ no se revisa.
+        self._lead_reciente = lead_reciente
+        self._busco_en_la_tienda = False
         # 038 — A qué etapas puede mover al lead (`lead.nextStages`).
         self.etapas: list[str] = list(etapas or [])
         # Lo último que se dijo en la conversación (app/dias.py). None ⇒ no
@@ -623,6 +640,7 @@ class ToolRuntime:
             if name == "route_out":
                 return await self._route_out()
             if name == "buscar_inventario" and self._ctx.settings.tienda_configurada:
+                self._busco_en_la_tienda = True
                 cantidad = args.get("cantidad")
                 resultado = await buscar_inventario(
                     self._ctx.settings,
@@ -1234,7 +1252,32 @@ class ToolRuntime:
         }
 
     def _handoff(self, args: dict[str, Any]) -> dict[str, Any]:
-        self.handoff_reason = str(args.get("reason") or "lead_request")
+        reason = str(args.get("reason") or "lead_request")
+        # vocero-crm 067 — Con tienda, un «el lead pidió una persona» que el
+        # lead no dijo se revisa antes de pausar la IA: en vivo, con un
+        # historial lleno de ofertas de pasarlo con alguien, el modelo tomó un
+        # «gracias» como petición y nunca buscó la pieza que le pedían. Pedir
+        # confirmación cuesta una vuelta; pasar a una persona a quien solo
+        # quería precio cuesta la venta.
+        if (
+            canonical_handoff_reason(reason) == "cliente"
+            and args.get("confirmado") is not True
+            and not self._busco_en_la_tienda
+            and self._lead_reciente is not None
+            and self._ctx.settings.tienda_configurada
+            and self._profile.permite("inventario")
+            and not _PIDE_PERSONA.search(self._lead_reciente)
+        ):
+            return {
+                "ok": False,
+                "error": "confirma_handoff",
+                "detalle": (
+                    "el lead no pidió una persona en sus mensajes. Si te preguntó por un producto "
+                    "o una pieza, búscalo con buscar_inventario y contéstale. Si de verdad quiere "
+                    "una persona (por ejemplo, aceptó tu oferta), vuelve a llamar handoff con confirmado=true."
+                ),
+            }
+        self.handoff_reason = reason
         return {
             "ok": True,
             "nota": (
