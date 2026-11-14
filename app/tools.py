@@ -34,6 +34,7 @@ from app.tienda import (
     MAX_LINEAS,
     armar_cotizacion,
     buscar_inventario,
+    es_compra_directa,
     resolver,
     resumen_de_cotizacion,
     texto_de_nota,
@@ -298,11 +299,12 @@ COTIZAR_SCHEMA: dict[str, Any] = {
     "function": {
         "name": "cotizar",
         "description": (
-            "Arma el borrador de la cotización y se lo pasa a una persona del "
-            "negocio para que lo apruebe. Llámala SOLO después de: (1) repetirle "
-            "al lead la lista (producto y cantidad) y recibir su «sí», y (2) "
-            "preguntarle si requiere factura (CFDI). Tú NUNCA le mandas enlace "
-            "ni total: eso lo manda la persona al aprobar."
+            "Arma la cotización. Si todo se compra ya y es un monto chico, el "
+            "lead recibe su enlace de compra en tu mensaje; si no, una persona "
+            "del negocio la aprueba. Llámala SOLO después de: (1) repetirle al "
+            "lead la lista (producto y cantidad) y recibir su «sí», y (2) "
+            "preguntarle si requiere factura (CFDI). Tú NUNCA escribes el "
+            "enlace ni el total: se agregan solos cuando toca."
         ),
         "parameters": {
             "type": "object",
@@ -343,6 +345,7 @@ COTIZAR_SCHEMA: dict[str, Any] = {
 # (spec 067): el negocio las crea con estos nombres. Sin ellas, no se mueve.
 ETAPA_CONSULTA = "Consulta de producto"
 ETAPA_COTIZACION = "Cotización pendiente"
+ETAPA_ENVIADA = "Cotización enviada"
 
 
 def con_inventario(schemas: list[dict[str, Any]], tienda: bool) -> list[dict[str, Any]]:
@@ -591,6 +594,9 @@ class ToolRuntime:
         self.routed_out = False
         self.proposed = False
         self.etapa_movida: str | None = None
+        # vocero-crm 067 — La cotización que el agente manda él mismo (compra
+        # directa); `finalize_reply` le pega el enlace y el total.
+        self.compra_directa: dict[str, Any] | None = None
 
     async def execute(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -1035,6 +1041,15 @@ class ToolRuntime:
         y Zoom, no de dónde es el enlace). Decir "Zoom" a quien le llegó un
         Meet es justo la clase de dato inventado que el agente no dice.
         """
+        cot = self.compra_directa
+        if cot:
+            # vocero-crm 067 — El enlace y el total los pone el código, no el
+            # modelo: un enlace mal copiado es una compra que no ocurre.
+            return (
+                f"{text}\n\nPara comprar: {cot['url']}\n"
+                f"Total: ${float(cot['totalEnlace']):,.2f} {cot['moneda']}, IVA incluido "
+                "(precio vigente al momento del pago)."
+            )
         data = self.booking_confirmation
         if not data:
             return text
@@ -1172,6 +1187,7 @@ class ToolRuntime:
             "cfdi": args["requiere_cfdi"],
             "origen": "audio" if args.get("transcripcion_audio") else "texto",
         }
+        cot["directa"] = es_compra_directa(cot, self._ctx.settings.compra_directa_max)
 
         try:
             await self._ctx.crm.post_note(self._crm_conv_id, texto_de_nota(cot, args.get("transcripcion_audio")))
@@ -1188,6 +1204,21 @@ class ToolRuntime:
         # enlace). Se pide aunque el lead ya esté en la etapa: una segunda
         # cotización actualiza el monto (el CRM contesta `changed: false`).
         monto = (round(float(cot["totalEnlace"]) * 100), cot["moneda"]) if cot.get("totalEnlace") else None
+        if cot["directa"]:
+            # Compra directa: todo se compra ya y no pasa del máximo. El
+            # enlace lo agrega `finalize_reply` tal cual; la IA sigue activa.
+            await self._mover(ETAPA_ENVIADA, monto)
+            self.compra_directa = cot
+            return {
+                "ok": True,
+                "compra_directa": True,
+                "productos": [l["titulo"] for l in cot["lineas"]],
+                "nota": (
+                    "listo: dile en una o dos líneas que ahí va su enlace para comprar y que puede "
+                    "pagar ahí mismo. NO escribas el enlace ni el total: se agregan solos al final "
+                    "de tu mensaje. Si pidió factura, dile que la solicita al pagar o con el equipo."
+                ),
+            }
         await self._mover(ETAPA_COTIZACION, monto)
         self.handoff_reason = "modelo"
         return {

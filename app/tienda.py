@@ -291,7 +291,11 @@ _MOTIVO = {
 def texto_de_nota(cot: dict[str, Any], transcripcion: str | None = None) -> str:
     """Lo que la persona lee en el hilo para aprobar (formato de la spec 067)."""
     moneda = cot.get("moneda") or ""
-    filas = [f"Cotización pendiente de aprobar ({cot['id']})"]
+    filas = [
+        f"Cotización enviada al cliente por el agente, compra directa ({cot['id']})"
+        if cot.get("directa")
+        else f"Cotización pendiente de aprobar ({cot['id']})"
+    ]
     for l in cot["lineas"]:
         nombre = l.get("titulo") or l["varianteId"]
         if l.get("sku"):
@@ -323,5 +327,22 @@ def resumen_de_cotizacion(cot: dict[str, Any]) -> str:
         estado = "en enlace" if l["enEnlace"] else _MOTIVO[l["motivo"]]
         partes.append(f"{l['cantidad']}× {nombre} ({estado})")
     total = f" Total del enlace ${float(cot['totalEnlace']):,.2f} {moneda}." if cot.get("totalEnlace") else ""
-    texto = f"{cot['id']} {cot.get('creada', '')[:10]}, pendiente de aprobar: {'; '.join(partes)}.{total} CFDI: {'sí' if cot.get('cfdi') else 'no'}."
+    estado = "enviada (compra directa)" if cot.get("directa") else "pendiente de aprobar"
+    texto = f"{cot['id']} {cot.get('creada', '')[:10]}, {estado}: {'; '.join(partes)}.{total} CFDI: {'sí' if cot.get('cfdi') else 'no'}."
     return texto if len(texto) <= 500 else texto[:497] + "…"
+
+
+def es_compra_directa(cot: dict[str, Any], maximo: float) -> bool:
+    """Pura: ¿el agente puede mandar el enlace él mismo?
+
+    Solo si TODO se compra ya (una orden mixta la ve una persona) y el total
+    no pasa del máximo, en la moneda de la tienda. Máximo 0 = nunca.
+    """
+    lineas = cot.get("lineas") or []
+    return (
+        maximo > 0
+        and bool(lineas)
+        and all(l["enEnlace"] for l in lineas)
+        and cot.get("totalEnlace") is not None
+        and float(cot["totalEnlace"]) <= maximo
+    )

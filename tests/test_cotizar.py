@@ -15,7 +15,7 @@ import httpx
 from app.llm import LlmReply, ToolCall
 from app.main import create_app
 from app.profile import BusinessProfile
-from app.tienda import armar_cotizacion, elegir, resumen_de_cotizacion, texto_de_nota
+from app.tienda import armar_cotizacion, elegir, es_compra_directa, resumen_de_cotizacion, texto_de_nota
 from app.tools import CLAVE_DE_HERRAMIENTA
 from tests.conftest import CRM_CONV_ID, CRM_URL, crm_context, despachar, make_ctx, make_settings, mock_crm_basics
 
@@ -227,4 +227,54 @@ async def test_sin_hablar_de_factura_no_cotiza(respx_mock):
     await _turno(ctx, "sí, así está bien")
     assert json.loads(ctx.llm.calls[1]["messages"][-1]["content"])["error"] == "falta_cfdi"
     assert not rutas["notes"].called and not rutas["handoff"].called
+    await ctx.crm.aclose()
+
+
+
+# --- compra directa (todo se compra ya y no pasa de COMPRA_DIRECTA_MAX) ---------
+
+
+def test_cuando_es_compra_directa():
+    solo = armar_cotizacion([(V1, 3)], {V1: _variante()}, ORIGEN)  # 33.51
+    assert es_compra_directa(solo, 500) is True
+    assert es_compra_directa(solo, 0) is False  # apagada
+    assert es_compra_directa(solo, 30) is False  # pasa del máximo
+    mixta = armar_cotizacion([(V1, 3), (V2, 1)], {V1: _variante(), V2: _variante(V2, qty=0, sobre=True)}, ORIGEN)
+    assert es_compra_directa(mixta, 500) is False  # una orden mixta la ve una persona
+
+
+def _solo_selectores(cantidad=3):
+    return LlmReply(content=None, tool_calls=[ToolCall(id="c", name="cotizar", arguments={
+        "lineas": [{"producto": "C3SS7-10B-20", "cantidad": cantidad}], "confirmado": True, "requiere_cfdi": False,
+    })])
+
+
+async def test_compra_directa_manda_el_enlace_sin_handoff(respx_mock):
+    ctx = _ctx()
+    rutas = _rutas(respx_mock)
+    ctx.llm.replies = [_solo_selectores(), LlmReply(content="Listo, aquí va tu enlace para comprar.")]
+    await _turno(ctx, "sí, así está bien, sin factura")
+
+    # El enlace y el total los pega el código al mensaje que sale al lead.
+    enviado = json.loads(rutas["messages"].calls[-1].request.content)["text"]
+    assert f"{ORIGEN}/cart/111:3" in enviado and "Total: $33.51 USD" in enviado
+    # Al modelo no le llega el enlace (no lo puede copiar mal).
+    assert "/cart/" not in ctx.llm.calls[1]["messages"][-1]["content"]
+    assert json.loads(rutas["stage"].calls[0].request.content) == {
+        "conversationId": CRM_CONV_ID, "stage": "Cotización enviada", "amountCents": 3351, "currency": "USD"}
+    nota = json.loads(rutas["notes"].calls[0].request.content)["texto"]
+    assert nota.startswith("Cotización enviada al cliente por el agente, compra directa")
+    assert not rutas["handoff"].called  # la IA sigue activa
+    await ctx.crm.aclose()
+
+
+async def test_pasar_del_maximo_va_a_una_persona(respx_mock):
+    ctx = _ctx()
+    rutas = _rutas(respx_mock)
+    ctx.llm.replies = [_solo_selectores(cantidad=60), LlmReply(content="Una persona revisa tu cotización.")]
+    # 60 × 11.17 = 670.20 > 500 (y hay 10: también queda fuera por existencia)
+    await _turno(ctx, "sí, así está bien, sin factura")
+    assert json.loads(rutas["stage"].calls[0].request.content)["stage"] == "Cotización pendiente"
+    assert rutas["handoff"].called
+    assert "/cart/" not in json.loads(rutas["messages"].calls[-1].request.content)["text"]
     await ctx.crm.aclose()

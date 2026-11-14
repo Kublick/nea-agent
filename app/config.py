@@ -87,6 +87,10 @@ class Settings(BaseSettings):
     # Origen del enlace de carrito de una cotización. Vacío = el dominio de
     # Shopify; con el storefront propio publicado, su dominio.
     cart_link_origin: str = ""
+    # Compra directa: si TODO lo cotizado se compra ya y el total no pasa de
+    # esto (en la moneda de la tienda), el agente manda el enlace él mismo.
+    # Lo demás lo aprueba una persona. 0 = siempre aprueba una persona.
+    compra_directa_max: float = 500.0
 
     @property
     def origen_del_carrito(self) -> str:

@@ -514,9 +514,9 @@ def build_system_prompt(
             "buscar_inventario; (2) repítesela (producto y cantidad) y pregunta "
             "«¿así está bien?»; (3) con su sí, pregúntale si requiere factura "
             "(CFDI), solo sí o no — RFC y datos los pide la persona; (4) llama "
-            "cotizar. Después dile que una persona revisa su cotización y se "
-            "la confirma en breve. Tú jamás le mandas enlace de compra ni "
-            "total final: eso lo manda la persona."
+            "cotizar y haz lo que te diga su resultado: o una persona revisa "
+            "su cotización, o va su enlace de compra. Tú nunca escribes un "
+            "enlace de compra ni el total: cuando toca, se agregan solos."
         )
     ficha = contact.get("ficha") or {}
     filled = {k: v for k, v in ficha.items() if v not in (None, "", [])}
