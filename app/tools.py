@@ -339,7 +339,9 @@ COTIZAR_SCHEMA: dict[str, Any] = {
     },
 }
 
-# La etapa a la que va el lead al dejar el borrador, si el pipeline la tiene.
+# Las etapas del pipeline que mueven las herramientas de la tienda, por nombre
+# (spec 067): el negocio las crea con estos nombres. Sin ellas, no se mueve.
+ETAPA_CONSULTA = "Consulta de producto"
 ETAPA_COTIZACION = "Cotización pendiente"
 
 
@@ -616,11 +618,17 @@ class ToolRuntime:
                 return await self._route_out()
             if name == "buscar_inventario" and self._ctx.settings.tienda_configurada:
                 cantidad = args.get("cantidad")
-                return await buscar_inventario(
+                resultado = await buscar_inventario(
                     self._ctx.settings,
                     str(args.get("consulta") or ""),
                     cantidad if isinstance(cantidad, int) and cantidad > 0 else None,
                 )
+                # Preguntó por un producto: la tarjeta pasa a «Consulta de
+                # producto» si esa etapa va adelante (está en las siguientes).
+                etapa = next((e for e in self.etapas if e.strip().lower() == ETAPA_CONSULTA.lower()), None)
+                if etapa and self.etapa_movida is None and resultado.get("ok"):
+                    await self._mover(etapa)
+                return resultado
             if name == "cotizar" and self._ctx.settings.tienda_configurada:
                 return await self._cotizar(args)
             if name == "handoff":
@@ -1099,6 +1107,16 @@ class ToolRuntime:
             out["instrucciones"] = "comparte estos recursos al despedirte, puerta abierta"
         return out
 
+    async def _mover(self, etapa: str, monto: tuple[int, str] | None = None) -> None:
+        """vocero-crm 067 — Mueve la tarjeta sin depender de que el modelo se
+        acuerde (en vivo no movía nada). El CRM decide si se puede: solo hacia
+        adelante, con `etapa` encendida; si no, no pasa nada."""
+        try:
+            data = await self._ctx.crm.move_stage(self._crm_conv_id, etapa, monto)
+            self.etapa_movida = ((data or {}).get("lead") or {}).get("stageName") or etapa
+        except CrmConflict as exc:
+            logger.info("tools: no se movió a %r: %s", etapa, exc.code)
+
     async def _cotizar(self, args: dict[str, Any]) -> dict[str, Any]:
         """vocero-crm 067 — Borrador de cotización para que una persona lo apruebe.
 
@@ -1166,13 +1184,11 @@ class ToolRuntime:
             self._crm_conv_id,
             {"ultima_cotizacion": resumen_de_cotizacion(cot), "requiere_cfdi": cot["cfdi"]},
         )
-        etapa = next((e for e in self.etapas if e.strip().lower() == ETAPA_COTIZACION.lower()), None)
-        if etapa:
-            try:
-                await self._ctx.crm.move_stage(self._crm_conv_id, etapa)
-                self.etapa_movida = etapa
-            except CrmConflict as exc:
-                logger.info("tools: cotizar no movió la etapa: %s", exc.code)
+        # El monto del trato = lo que se puede comprar ya (el total del
+        # enlace). Se pide aunque el lead ya esté en la etapa: una segunda
+        # cotización actualiza el monto (el CRM contesta `changed: false`).
+        monto = (round(float(cot["totalEnlace"]) * 100), cot["moneda"]) if cot.get("totalEnlace") else None
+        await self._mover(ETAPA_COTIZACION, monto)
         self.handoff_reason = "modelo"
         return {
             "ok": True,

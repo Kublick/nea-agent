@@ -172,7 +172,9 @@ async def test_cotizar_deja_nota_ficha_etapa_y_handoff(respx_mock):
     assert all(isinstance(v, (str, bool, int, float)) for v in ficha.values())
     assert ficha["requiere_cfdi"] is True and len(ficha["ultima_cotizacion"]) <= 500
     assert "/cart/" not in ficha["ultima_cotizacion"] and "Total del enlace $33.51 USD" in ficha["ultima_cotizacion"]
-    assert json.loads(rutas["stage"].calls[0].request.content)["stage"] == "Cotización pendiente"
+    # La tarjeta va a «Cotización pendiente» con el monto de lo que se compra ya.
+    assert json.loads(rutas["stage"].calls[0].request.content) == {
+        "conversationId": CRM_CONV_ID, "stage": "Cotización pendiente", "amountCents": 3351, "currency": "USD"}
     assert rutas["messages"].called and rutas["handoff"].called
     assert json.loads(rutas["handoff"].calls[0].request.content)["reason"] == "modelo"
     # El enlace jamás vuelve al modelo.

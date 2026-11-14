@@ -16,7 +16,7 @@ from app.main import create_app
 from app.profile import BusinessProfile
 from app.tienda import resumen
 from app.tools import CLAVE_DE_HERRAMIENTA
-from tests.conftest import despachar, make_ctx, make_settings, mock_crm_basics
+from tests.conftest import CRM_CONV_ID, CRM_URL, crm_context, despachar, make_ctx, make_settings, mock_crm_basics
 
 DOMINIO = "tienda.test"
 SHOPIFY = f"https://{DOMINIO}/api/2026-10/graphql.json"
@@ -188,4 +188,38 @@ async def test_si_shopify_falla_el_modelo_lo_sabe_y_el_turno_sigue(respx_mock):
     resultado = json.loads(ctx.llm.calls[1]["messages"][-1]["content"])
     assert resultado == {"ok": False, "error": "tienda_no_disponible", "detalle": "no pude consultar la tienda; no inventes existencias ni precios"}
     assert rutas["messages"].called  # el lead sí recibió respuesta
+    await ctx.crm.aclose()
+
+
+async def test_preguntar_por_un_producto_mueve_a_consulta_de_producto(respx_mock):
+    # En vivo el modelo nunca llamaba move_stage por su cuenta.
+    ctx = _ctx()
+    rutas = mock_crm_basics(respx_mock)
+    contexto = crm_context()
+    contexto["lead"]["nextStages"] = [{"id": "st_c", "name": "Consulta de producto"}, {"id": "st_q", "name": "Cotización pendiente"}]
+    rutas["context"].mock(return_value=httpx.Response(200, json=contexto))
+    stage = respx_mock.post(f"{CRM_URL}/api/bot/stage").mock(
+        return_value=httpx.Response(200, json={"ok": True, "changed": True, "lead": {"id": "ld_1", "stageName": "Consulta de producto"}})
+    )
+    respx_mock.post(SHOPIFY).mock(return_value=httpx.Response(200, json={"data": {"search": {"nodes": [_producto()]}}}))
+    ctx.llm.replies = [
+        LlmReply(content=None, tool_calls=[ToolCall(id="i", name="buscar_inventario", arguments={"consulta": "contactor ABB"})]),
+        LlmReply(content="Sí, tenemos el AF26."),
+    ]
+    await _turno(ctx)
+    assert json.loads(stage.calls[0].request.content) == {"conversationId": CRM_CONV_ID, "stage": "Consulta de producto"}
+    await ctx.crm.aclose()
+
+
+async def test_sin_esa_etapa_adelante_no_se_mueve(respx_mock):
+    ctx = _ctx()
+    mock_crm_basics(respx_mock)  # sin nextStages
+    stage = respx_mock.post(f"{CRM_URL}/api/bot/stage").mock(return_value=httpx.Response(200, json={}))
+    respx_mock.post(SHOPIFY).mock(return_value=httpx.Response(200, json={"data": {"search": {"nodes": [_producto()]}}}))
+    ctx.llm.replies = [
+        LlmReply(content=None, tool_calls=[ToolCall(id="i", name="buscar_inventario", arguments={"consulta": "contactor ABB"})]),
+        LlmReply(content="Sí, tenemos el AF26."),
+    ]
+    await _turno(ctx)
+    assert not stage.called
     await ctx.crm.aclose()
