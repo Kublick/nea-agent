@@ -508,6 +508,16 @@ def build_system_prompt(
             "regresa e incluyen IVA. Si la tienda no responde o no encuentra "
             "el producto, dilo con honestidad y ofrece pasarlo con una persona."
         )
+    if inventario and profile.permite("cotizar"):
+        lines.append(
+            "- Si el lead quiere cotización o comprar: (1) arma la lista con "
+            "buscar_inventario; (2) repítesela (producto y cantidad) y pregunta "
+            "«¿así está bien?»; (3) con su sí, pregúntale si requiere factura "
+            "(CFDI), solo sí o no — RFC y datos los pide la persona; (4) llama "
+            "cotizar. Después dile que una persona revisa su cotización y se "
+            "la confirma en breve. Tú jamás le mandas enlace de compra ni "
+            "total final: eso lo manda la persona."
+        )
     ficha = contact.get("ficha") or {}
     filled = {k: v for k, v in ficha.items() if v not in (None, "", [])}
     if filled:

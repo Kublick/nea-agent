@@ -6,6 +6,7 @@ Endpoints:
   POST /api/bot/messages   {conversationId, text}   → 409 ai_paused|window_closed
   PUT  /api/bot/ficha      {conversationId, ficha}
   POST /api/bot/handoff    {conversationId, reason}
+  POST /api/bot/notes      {conversationId, texto}  → nota interna (solo con TIENDA)
   GET  /api/bot/availability?conversationId=&limit=&perDay=&days=
                                                     → huecos repartidos por día,
                                                       REGISTRADOS como la oferta
@@ -284,6 +285,24 @@ class CrmClient:
             raise CrmConflict(_conflict_code(resp), _payload(resp))
         if resp.status_code != 200:
             raise CrmError(f"stage devolvió {resp.status_code}")
+        data: dict[str, Any] = resp.json()
+        return data
+
+    async def post_note(self, conversation_id: str, texto: str) -> dict[str, Any]:
+        """vocero-crm 067 — Nota interna en el hilo (`POST /api/bot/notes`).
+
+        Solo existe con la bandera `TIENDA` del CRM (si no, 404 vacío). El 409
+        (`herramienta_apagada`, `ai_paused`) sube como `CrmConflict`.
+        """
+        resp = await self._request(
+            "POST",
+            "/api/bot/notes",
+            json={"conversationId": conversation_id, "texto": texto},
+        )
+        if resp.status_code == 409:
+            raise CrmConflict(_conflict_code(resp), _payload(resp))
+        if resp.status_code != 201:
+            raise CrmError(f"notes devolvió {resp.status_code}")
         data: dict[str, Any] = resp.json()
         return data
 

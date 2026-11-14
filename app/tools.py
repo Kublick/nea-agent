@@ -14,6 +14,8 @@ nunca tumba el turno.
 from __future__ import annotations
 
 import logging
+import re
+import secrets
 from datetime import date, datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -28,7 +30,14 @@ from app.crm import (
 from app.dias import nombra_un_dia
 from app.profile import BusinessProfile
 from app.state import AppContext, Conversation, OfferedSlot
-from app.tienda import buscar_inventario
+from app.tienda import (
+    MAX_LINEAS,
+    armar_cotizacion,
+    buscar_inventario,
+    resolver,
+    resumen_de_cotizacion,
+    texto_de_nota,
+)
 
 logger = logging.getLogger("nea.tools")
 
@@ -284,9 +293,59 @@ INVENTARIO_SCHEMA: dict[str, Any] = {
 }
 
 
+COTIZAR_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "cotizar",
+        "description": (
+            "Arma el borrador de la cotización y se lo pasa a una persona del "
+            "negocio para que lo apruebe. Llámala SOLO después de: (1) repetirle "
+            "al lead la lista (producto y cantidad) y recibir su «sí», y (2) "
+            "preguntarle si requiere factura (CFDI). Tú NUNCA le mandas enlace "
+            "ni total: eso lo manda la persona al aprobar."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "lineas": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "producto": {
+                                "type": "string",
+                                "description": "Número de parte tal cual (p. ej. C3SS7-10B-20) o, si no hay, el nombre del producto que confirmó",
+                            },
+                            "cantidad": {"type": "integer"},
+                        },
+                        "required": ["producto", "cantidad"],
+                    },
+                },
+                "confirmado": {
+                    "type": "boolean",
+                    "description": "true SOLO si el lead confirmó con un sí la lista que le repetiste",
+                },
+                "requiere_cfdi": {
+                    "type": "boolean",
+                    "description": "Lo que contestó el lead a si requiere factura (CFDI)",
+                },
+                "transcripcion_audio": {
+                    "type": "string",
+                    "description": "Si el pedido llegó por nota de voz, su transcripción; si no, omítelo",
+                },
+            },
+            "required": ["lineas", "confirmado", "requiere_cfdi"],
+        },
+    },
+}
+
+# La etapa a la que va el lead al dejar el borrador, si el pipeline la tiene.
+ETAPA_COTIZACION = "Cotización pendiente"
+
+
 def con_inventario(schemas: list[dict[str, Any]], tienda: bool) -> list[dict[str, Any]]:
-    """El catálogo del turno más `buscar_inventario` si hay tienda configurada."""
-    return schemas + [INVENTARIO_SCHEMA] if tienda else schemas
+    """El catálogo del turno más las herramientas de la tienda si está configurada."""
+    return schemas + [INVENTARIO_SCHEMA, COTIZAR_SCHEMA] if tienda else schemas
 
 
 # Recordatorios de la cita: SOLO los manda la agenda v2 de Vocero Cloud. El
@@ -324,6 +383,7 @@ CLAVE_DE_HERRAMIENTA = {
     "reschedule_session": "reprogramar",
     "route_out": "salida",
     "buscar_inventario": "inventario",
+    "cotizar": "cotizar",
     "handoff": "escalar",
 }
 
@@ -561,6 +621,8 @@ class ToolRuntime:
                     str(args.get("consulta") or ""),
                     cantidad if isinstance(cantidad, int) and cantidad > 0 else None,
                 )
+            if name == "cotizar" and self._ctx.settings.tienda_configurada:
+                return await self._cotizar(args)
             if name == "handoff":
                 return self._handoff(args)
             logger.warning("tools: herramienta desconocida %r", name)
@@ -1036,6 +1098,93 @@ class ToolRuntime:
             out["recursos"] = self._profile.resources
             out["instrucciones"] = "comparte estos recursos al despedirte, puerta abierta"
         return out
+
+    async def _cotizar(self, args: dict[str, Any]) -> dict[str, Any]:
+        """vocero-crm 067 — Borrador de cotización para que una persona lo apruebe.
+
+        Orden: nota (el CRM la rechaza si `cotizar` está apagada o la IA en
+        pausa, y entonces no se escribe nada más) → ficha → etapa → handoff
+        después de la despedida. El enlace NUNCA vuelve al modelo: lo manda la
+        persona al aprobar (spec 067, D4).
+        """
+        if args.get("confirmado") is not True:
+            return {"ok": False, "error": "falta_confirmacion",
+                    "detalle": "repítele la lista (producto y cantidad) y espera su sí antes de cotizar"}
+        # El modelo se saltaba la pregunta y llenaba el campo a ojo (prueba en
+        # vivo del 2026-11-13). Se exige que la factura se haya hablado en lo
+        # último de la conversación, como `nombra_un_dia` con las fechas.
+        hablada = self._conversacion_reciente is None or re.search(
+            r"factura|cfdi", self._conversacion_reciente, re.IGNORECASE
+        )
+        if not isinstance(args.get("requiere_cfdi"), bool) or not hablada:
+            return {"ok": False, "error": "falta_cfdi",
+                    "detalle": "antes de cotizar pregúntale si requiere factura (CFDI), solo sí o no, y espera su respuesta"}
+        lineas = [
+            (str((l or {}).get("producto") or "").strip(), (l or {}).get("cantidad"))
+            for l in args.get("lineas") or []
+        ]
+        lineas = [(p, c) for p, c in lineas if p and isinstance(c, int) and c > 0]
+        if not lineas or len(lineas) > MAX_LINEAS:
+            return {"ok": False, "error": "lineas_invalidas",
+                    "detalle": f"manda de 1 a {MAX_LINEAS} líneas, cada una con producto y cantidad"}
+
+        # Se resuelve AHORA contra la tienda: el modelo no guarda ids entre
+        # turnos, y la existencia pudo cambiar desde que armó la lista.
+        pedido: dict[str, int] = {}
+        por_id: dict[str, dict[str, Any]] = {}
+        for producto, cantidad in lineas:
+            resuelto = await resolver(self._ctx.settings, producto)
+            if resuelto is None:
+                return {"ok": False, "error": "tienda_no_disponible",
+                        "detalle": "no pude consultar la tienda; no inventes precios, ofrece pasarlo con una persona"}
+            estado, valor = resuelto
+            if estado == "ambiguo":
+                return {"ok": False, "error": "producto_ambiguo", "producto": producto, "opciones": valor,
+                        "detalle": "pregúntale cuál de estas es y vuelve a cotizar con su número de parte"}
+            if estado == "no_encontrado":
+                return {"ok": False, "error": "producto_no_encontrado", "producto": producto,
+                        "detalle": "no está en la tienda; díselo y pregúntale si lo quita o lo ve una persona"}
+            por_id[valor["id"]] = valor
+            pedido[valor["id"]] = pedido.get(valor["id"], 0) + cantidad
+        cot = armar_cotizacion(list(pedido.items()), por_id, self._ctx.settings.origen_del_carrito)
+        cot = {
+            "id": f"cot_{secrets.token_hex(6)}",
+            "creada": _iso_z(datetime.now(timezone.utc)),
+            **cot,
+            "cfdi": args["requiere_cfdi"],
+            "origen": "audio" if args.get("transcripcion_audio") else "texto",
+        }
+
+        try:
+            await self._ctx.crm.post_note(self._crm_conv_id, texto_de_nota(cot, args.get("transcripcion_audio")))
+        except CrmConflict as exc:
+            return {"ok": False, "error": exc.code, "detalle": "no se pudo dejar la cotización; haz handoff"}
+        # La ficha del CRM solo guarda escalares cortos (listas y objetos los
+        # tira sin error): aquí va el resumen de la última, sin enlace. El
+        # historial completo de cotizaciones son las notas del hilo.
+        await self._ctx.crm.put_ficha(
+            self._crm_conv_id,
+            {"ultima_cotizacion": resumen_de_cotizacion(cot), "requiere_cfdi": cot["cfdi"]},
+        )
+        etapa = next((e for e in self.etapas if e.strip().lower() == ETAPA_COTIZACION.lower()), None)
+        if etapa:
+            try:
+                await self._ctx.crm.move_stage(self._crm_conv_id, etapa)
+                self.etapa_movida = etapa
+            except CrmConflict as exc:
+                logger.info("tools: cotizar no movió la etapa: %s", exc.code)
+        self.handoff_reason = "modelo"
+        return {
+            "ok": True,
+            "en_borrador": [l["titulo"] for l in cot["lineas"] if l["enEnlace"]],
+            "fuera_del_enlace": [{"producto": l["titulo"], "motivo": l["motivo"]} for l in cot["lineas"] if not l["enEnlace"]],
+            "nota": (
+                "listo, y la conversación ya pasa a una persona: despídete diciendo que una persona "
+                "revisa su cotización y se la confirma en breve. No ofrezcas pasarlo con nadie. "
+                "No menciones enlaces, totales ni cómo funciona por dentro. Si algo va sobre pedido "
+                "o a cotizar aparte, dilo en una línea con esas palabras."
+            ),
+        }
 
     def _handoff(self, args: dict[str, Any]) -> dict[str, Any]:
         self.handoff_reason = str(args.get("reason") or "lead_request")

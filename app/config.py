@@ -84,6 +84,14 @@ class Settings(BaseSettings):
     # vacías = sin tienda: el modelo no ve `buscar_inventario`.
     shopify_store_domain: str = ""  # p. ej. mi-tienda.myshopify.com
     shopify_storefront_token: str = ""  # token PRIVADO de la Storefront API
+    # Origen del enlace de carrito de una cotización. Vacío = el dominio de
+    # Shopify; con el storefront propio publicado, su dominio.
+    cart_link_origin: str = ""
+
+    @property
+    def origen_del_carrito(self) -> str:
+        origen = self.cart_link_origin.strip().rstrip("/")
+        return origen or f"https://{self.shopify_store_domain.strip()}"
 
     @property
     def tienda_configurada(self) -> bool:
