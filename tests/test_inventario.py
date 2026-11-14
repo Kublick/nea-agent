@@ -266,3 +266,44 @@ async def test_otros_motivos_no_se_revisan(respx_mock):
     ctx, rutas = await _turno_handoff(respx_mock, "eso no lo sé", {"reason": "duda fuera del conocimiento"})
     assert rutas["handoff"].called
     await ctx.crm.aclose()
+
+
+# --- números de parte sin guiones (2026-11-13) ----------------------------------
+
+
+async def test_codigo_pegado_se_encuentra_por_prefijos(respx_mock):
+    from app.tienda import buscar_inventario as buscar
+
+    def _shopify(request):
+        q = json.loads(request.content)["variables"]["q"]
+        # Shopify parte los códigos en sus guiones: «C3SS710B20» no encuentra
+        # nada, el prefijo sí, junto con otros parecidos.
+        nodos = {
+            "c3ss7": [_producto("C3SS7-10B-11 selector rojo", sku="1sfa619216r1076"),
+                      _producto("C3SS7-10B-20 selector negro", sku="1sfa619216r1026")],
+        }.get(q, [])
+        return httpx.Response(200, json={"data": {"search": {"nodes": nodos}}})
+
+    respx_mock.post(SHOPIFY).mock(side_effect=_shopify)
+    s = make_settings(shopify_store_domain=DOMINIO, shopify_storefront_token="t")
+    r = await buscar(s, "C3SS710B20")
+    assert [p["producto"] for p in r["productos"]] == ["C3SS7-10B-20 selector negro"]
+
+
+async def test_puros_digitos_pide_escribirlo_como_en_la_etiqueta(respx_mock):
+    from app.tienda import buscar_inventario as buscar
+
+    ruta = respx_mock.post(SHOPIFY).mock(return_value=httpx.Response(200, json={"data": {"search": {"nodes": []}}}))
+    s = make_settings(shopify_store_domain=DOMINIO, shopify_storefront_token="t")
+    r = await buscar(s, "46528120054")
+    assert r["productos"] == [] and "como viene en la etiqueta" in r["nota"]
+    assert ruta.call_count == 1  # sin letras no se intentan prefijos
+
+
+async def test_una_busqueda_normal_no_hace_llamadas_de_mas(respx_mock):
+    from app.tienda import buscar_inventario as buscar
+
+    ruta = respx_mock.post(SHOPIFY).mock(return_value=httpx.Response(200, json={"data": {"search": {"nodes": []}}}))
+    s = make_settings(shopify_store_domain=DOMINIO, shopify_storefront_token="t")
+    await buscar(s, "contactor ABB")
+    assert ruta.call_count == 1

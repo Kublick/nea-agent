@@ -121,10 +121,55 @@ async def resolver(
     """El producto que el lead confirmó, consultado AHORA (la lista se armó
     turnos atrás y el modelo no guarda ids entre turnos). None si Shopify no
     contestó."""
-    data = await _graphql(settings, _QUERY, {"q": producto, "n": MAX_RESULTADOS}, client)
+    nodos = await _buscar_nodos(settings, producto, client)
+    if nodos is None:
+        return None
+    return elegir(nodos, producto)
+
+
+def _es_codigo_pegado(consulta: str) -> bool:
+    """Un número de parte escrito sin guiones: una sola palabra con letras y dígitos."""
+    s = consulta.strip()
+    return " " not in s and len(_norma(s)) >= 5 and bool(re.search(r"\d", s)) and bool(re.search(r"[a-z]", s, re.I))
+
+
+async def _buscar_nodos(
+    settings: Settings, consulta: str, client: httpx.AsyncClient | None
+) -> list[dict[str, Any]] | None:
+    """Los productos de la búsqueda; None si Shopify no contestó.
+
+    La búsqueda de Shopify parte los números de parte en sus guiones: con
+    «C3SS7-10B-20» encuentra, con «C3SS710B20» no. Si no hay nada y la
+    consulta parece un código pegado, se busca por prefijos cada vez más
+    cortos y solo se queda lo que, sin separadores, es ese código (en el
+    título o en el SKU). Los códigos de puros dígitos no se rescatan así: la
+    búsqueda no los parte (ver la nota de `buscar_inventario`).
+    """
+    data = await _graphql(settings, _QUERY, {"q": consulta, "n": MAX_RESULTADOS}, client)
     if data is None:
         return None
-    return elegir([n for n in data["search"]["nodes"] if n], producto)
+    nodos = [n for n in data["search"]["nodes"] if n]
+    if nodos or not _es_codigo_pegado(consulta):
+        return nodos
+    meta = _norma(consulta)
+    for k in (8, 6, 5, 4, 3):
+        if k >= len(meta):
+            continue
+        data = await _graphql(settings, _QUERY, {"q": meta[:k], "n": 250}, client)
+        if data is None:
+            return None
+        aciertos = [
+            n
+            for n in data["search"]["nodes"]
+            if n
+            and (
+                meta in _norma(n.get("title") or "")
+                or any(_norma(v.get("sku") or "") == meta for v in ((n.get("variants") or {}).get("nodes") or []))
+            )
+        ]
+        if aciertos:
+            return aciertos[:MAX_RESULTADOS]
+    return []
 
 
 def es_precio_a_cotizar(monto: Any) -> bool:
@@ -197,17 +242,17 @@ async def buscar_inventario(
     consulta = (consulta or "").strip()
     if not consulta:
         return {"ok": False, "error": "consulta_vacia", "detalle": "dime qué producto buscar"}
-    data = await _graphql(settings, _QUERY, {"q": consulta, "n": MAX_RESULTADOS}, client)
-    if data is None:
+    nodos = await _buscar_nodos(settings, consulta, client)
+    if nodos is None:
         return {"ok": False, "error": "tienda_no_disponible", "detalle": "no pude consultar la tienda; no inventes existencias ni precios"}
 
-    productos = [
-        p
-        for p in (resumen(n, consulta, cantidad) for n in data["search"]["nodes"] if n)
-        if p is not None
-    ][:MAX_RESULTADOS]
+    productos = [p for p in (resumen(n, consulta, cantidad) for n in nodos) if p is not None][:MAX_RESULTADOS]
     if not productos:
-        return {"ok": True, "productos": [], "nota": "no encontré ese producto en la tienda"}
+        nota = "no encontré ese producto en la tienda"
+        if re.fullmatch(r"[\d\s.]{5,}", consulta):
+            # Puros dígitos pegados: la búsqueda de Shopify no los encuentra.
+            nota += "; si es un número de parte, pídele que lo escriba como viene en la etiqueta, con sus guiones o espacios"
+        return {"ok": True, "productos": [], "nota": nota}
     return {"ok": True, "productos": productos}
 
 
