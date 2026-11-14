@@ -80,6 +80,17 @@ class Settings(BaseSettings):
     agent_timezone: str = "America/Mexico_City"
     brief_path: str = ""  # markdown local, fallback si el CRM no tiene perfil
 
+    # Tienda Shopify (vocero-crm 067, herramienta `inventario`). Las dos
+    # vacías = sin tienda: el modelo no ve `buscar_inventario`.
+    shopify_store_domain: str = ""  # p. ej. mi-tienda.myshopify.com
+    shopify_storefront_token: str = ""  # token PRIVADO de la Storefront API
+
+    @property
+    def tienda_configurada(self) -> bool:
+        # Un `.env` copiado sin llenar trae los REEMPLAZA_: eso no es tienda.
+        valores = (self.shopify_store_domain.strip(), self.shopify_storefront_token.strip())
+        return all(v and not v.startswith("REEMPLAZA") for v in valores)
+
     # LLM
     # El proveedor del modelo no tiene por qué ser OpenAI, así que las
     # variables no llevan su nombre: llamarlas OPENAI_* apuntando a OpenRouter

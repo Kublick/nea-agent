@@ -28,6 +28,7 @@ from app.crm import (
 from app.dias import nombra_un_dia
 from app.profile import BusinessProfile
 from app.state import AppContext, Conversation, OfferedSlot
+from app.tienda import buscar_inventario
 
 logger = logging.getLogger("nea.tools")
 
@@ -247,6 +248,47 @@ def con_mover_etapa(schemas: list[dict[str, Any]], etapas: list[str]) -> list[di
     return schemas + [MOVE_STAGE_SCHEMA] if etapas else schemas
 
 
+# vocero-crm 067 — Consultar la tienda Shopify. Como `move_stage`, no va en
+# TOOL_SCHEMAS: solo existe si esta Nea tiene la tienda configurada
+# (`SHOPIFY_*`). Y además el perfil del CRM tiene que traer `inventario`
+# encendida (bandera `TIENDA` del CRM), vía `solo_encendidas`.
+INVENTARIO_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "buscar_inventario",
+        "description": (
+            "Busca productos en la tienda del negocio y dice si hay existencia "
+            "y su precio. Úsala SIEMPRE que el lead pregunte si tienen algo, "
+            "cuánto cuesta o si alcanza para una cantidad; nunca contestes eso "
+            "de memoria. Regresa como mucho 3 productos."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "consulta": {
+                    "type": "string",
+                    "description": (
+                        "Qué buscar: número de parte/SKU si lo dio (tal cual), "
+                        "o marca + tipo de producto (p. ej. 'contactor ABB'). "
+                        "Pocas palabras clave, sin frases."
+                    ),
+                },
+                "cantidad": {
+                    "type": "integer",
+                    "description": "Cuántas piezas pidió el lead. Omítela si no dijo una cantidad.",
+                },
+            },
+            "required": ["consulta"],
+        },
+    },
+}
+
+
+def con_inventario(schemas: list[dict[str, Any]], tienda: bool) -> list[dict[str, Any]]:
+    """El catálogo del turno más `buscar_inventario` si hay tienda configurada."""
+    return schemas + [INVENTARIO_SCHEMA] if tienda else schemas
+
+
 # Recordatorios de la cita: SOLO los manda la agenda v2 de Vocero Cloud. El
 # CRM raíz no tiene recordatorios, y con este campo obligatorio en su
 # book_session el modelo, para llenarlo, le preguntaba al lead «¿te mando un
@@ -281,6 +323,7 @@ CLAVE_DE_HERRAMIENTA = {
     "coordination_consent": "agendar",
     "reschedule_session": "reprogramar",
     "route_out": "salida",
+    "buscar_inventario": "inventario",
     "handoff": "escalar",
 }
 
@@ -511,6 +554,13 @@ class ToolRuntime:
                 return await self._reschedule_session(args)
             if name == "route_out":
                 return await self._route_out()
+            if name == "buscar_inventario" and self._ctx.settings.tienda_configurada:
+                cantidad = args.get("cantidad")
+                return await buscar_inventario(
+                    self._ctx.settings,
+                    str(args.get("consulta") or ""),
+                    cantidad if isinstance(cantidad, int) and cantidad > 0 else None,
+                )
             if name == "handoff":
                 return self._handoff(args)
             logger.warning("tools: herramienta desconocida %r", name)

@@ -35,6 +35,7 @@ from app.prompt import build_system_prompt, zona_del_negocio
 from app.state import AppContext, BotMessage, InboundMessage, utcnow
 from app.tools import (
     ToolRuntime,
+    con_inventario,
     con_mover_etapa,
     etapas_siguientes,
     solo_encendidas,
@@ -392,6 +393,7 @@ async def run_turn(
         tz=tz,
         recordatorios=bool(getattr(ctx.crm, "supports_agenda_v2", False)),
         canal=next((m.channel for m in inbound if m.channel), None),
+        inventario=ctx.settings.tienda_configurada,
     )
     # Se traen más mensajes de los que ve el LLM: el candado de cierre cuenta
     # el hilo COMPLETO del lead, no solo la ventana de contexto.
@@ -729,13 +731,16 @@ async def _tool_loop(
         reply = await ctx.llm.complete(
             messages,
             tools=solo_encendidas(
-                con_mover_etapa(
-                    tool_schemas(
-                        ctx.agenda_enabled,
-                        bool(getattr(ctx.crm, "supports_agenda_v2", False)),
-                        bool(getattr(ctx.crm, "supports_coordination", False)),
+                con_inventario(
+                    con_mover_etapa(
+                        tool_schemas(
+                            ctx.agenda_enabled,
+                            bool(getattr(ctx.crm, "supports_agenda_v2", False)),
+                            bool(getattr(ctx.crm, "supports_coordination", False)),
+                        ),
+                        getattr(runtime, "etapas", []),
                     ),
-                    getattr(runtime, "etapas", []),
+                    ctx.settings.tienda_configurada,
                 ),
                 getattr(runtime, "_profile", None),
             ),
