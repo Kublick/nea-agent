@@ -14,6 +14,8 @@ nunca tumba el turno.
 from __future__ import annotations
 
 import logging
+import re
+import secrets
 from datetime import date, datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -24,10 +26,20 @@ from app.crm import (
     CrmError,
     SlotNotOffered,
     SlotTaken,
+    canonical_handoff_reason,
 )
 from app.dias import nombra_un_dia
 from app.profile import BusinessProfile
 from app.state import AppContext, Conversation, OfferedSlot
+from app.tienda import (
+    MAX_LINEAS,
+    armar_cotizacion,
+    buscar_inventario,
+    es_compra_directa,
+    resolver,
+    resumen_de_cotizacion,
+    texto_de_nota,
+)
 
 logger = logging.getLogger("nea.tools")
 
@@ -189,7 +201,11 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "reason": {
                         "type": "string",
                         "description": "Motivo breve (p.ej. 'pidió humano', 'duda fuera del conocimiento')",
-                    }
+                    },
+                    "confirmado": {
+                        "type": "boolean",
+                        "description": "Solo si la herramienta te pidió confirmar: true si el lead de verdad quiere una persona (p. ej. aceptó tu oferta)",
+                    },
                 },
             },
         },
@@ -247,6 +263,110 @@ def con_mover_etapa(schemas: list[dict[str, Any]], etapas: list[str]) -> list[di
     return schemas + [MOVE_STAGE_SCHEMA] if etapas else schemas
 
 
+# vocero-crm 067 — Consultar la tienda Shopify. Como `move_stage`, no va en
+# TOOL_SCHEMAS: solo existe si esta Nea tiene la tienda configurada
+# (`SHOPIFY_*`). Y además el perfil del CRM tiene que traer `inventario`
+# encendida (bandera `TIENDA` del CRM), vía `solo_encendidas`.
+INVENTARIO_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "buscar_inventario",
+        "description": (
+            "Busca productos en la tienda del negocio y dice si hay existencia "
+            "y su precio. Úsala SIEMPRE que el lead pregunte si tienen algo, "
+            "cuánto cuesta o si alcanza para una cantidad; nunca contestes eso "
+            "de memoria. Regresa como mucho 3 productos."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "consulta": {
+                    "type": "string",
+                    "description": (
+                        "Qué buscar: número de parte/SKU si lo dio (tal cual), "
+                        "o marca + tipo de producto (p. ej. 'contactor ABB'). "
+                        "Pocas palabras clave, sin frases."
+                    ),
+                },
+                "cantidad": {
+                    "type": "integer",
+                    "description": "Cuántas piezas pidió el lead. Omítela si no dijo una cantidad.",
+                },
+            },
+            "required": ["consulta"],
+        },
+    },
+}
+
+
+COTIZAR_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "cotizar",
+        "description": (
+            "Arma la cotización. Si todo se compra ya y es un monto chico, el "
+            "lead recibe su enlace de compra en tu mensaje; si no, una persona "
+            "del negocio la aprueba. Llámala SOLO después de: (1) repetirle al "
+            "lead la lista (producto y cantidad) y recibir su «sí», y (2) "
+            "preguntarle si requiere factura (CFDI). Tú NUNCA escribes el "
+            "enlace ni el total: se agregan solos cuando toca."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "lineas": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "producto": {
+                                "type": "string",
+                                "description": "Número de parte tal cual (p. ej. C3SS7-10B-20) o, si no hay, el nombre del producto que confirmó",
+                            },
+                            "cantidad": {"type": "integer"},
+                        },
+                        "required": ["producto", "cantidad"],
+                    },
+                },
+                "confirmado": {
+                    "type": "boolean",
+                    "description": "true SOLO si el lead confirmó con un sí la lista que le repetiste",
+                },
+                "requiere_cfdi": {
+                    "type": "boolean",
+                    "description": "Lo que contestó el lead a si requiere factura (CFDI)",
+                },
+                "transcripcion_audio": {
+                    "type": "string",
+                    "description": "Si el pedido llegó por nota de voz, su transcripción; si no, omítelo",
+                },
+            },
+            "required": ["lineas", "confirmado", "requiere_cfdi"],
+        },
+    },
+}
+
+# Las etapas del pipeline que mueven las herramientas de la tienda, por nombre
+# (spec 067): el negocio las crea con estos nombres. Sin ellas, no se mueve.
+ETAPA_CONSULTA = "Consulta de producto"
+ETAPA_COTIZACION = "Cotización pendiente"
+ETAPA_ENVIADA = "Cotización enviada"
+
+_HABLA_FACTURA = re.compile(r"factura|cfdi", re.IGNORECASE)
+
+# El lead pide una persona con sus palabras (ver `ToolRuntime._handoff`).
+_PIDE_PERSONA = re.compile(
+    r"persona|humano|alguien|asesor|vendedor|ejecutivo|encargad|representante|"
+    r"\bagente\b|hablar con|llamar|llámame|llamame|atiend[ae]",
+    re.IGNORECASE,
+)
+
+
+def con_inventario(schemas: list[dict[str, Any]], tienda: bool) -> list[dict[str, Any]]:
+    """El catálogo del turno más las herramientas de la tienda si está configurada."""
+    return schemas + [INVENTARIO_SCHEMA, COTIZAR_SCHEMA] if tienda else schemas
+
+
 # Recordatorios de la cita: SOLO los manda la agenda v2 de Vocero Cloud. El
 # CRM raíz no tiene recordatorios, y con este campo obligatorio en su
 # book_session el modelo, para llenarlo, le preguntaba al lead «¿te mando un
@@ -281,6 +401,8 @@ CLAVE_DE_HERRAMIENTA = {
     "coordination_consent": "agendar",
     "reschedule_session": "reprogramar",
     "route_out": "salida",
+    "buscar_inventario": "inventario",
+    "cotizar": "cotizar",
     "handoff": "escalar",
 }
 
@@ -468,8 +590,16 @@ class ToolRuntime:
         tz: ZoneInfo | None = None,
         conversacion_reciente: str | None = None,
         etapas: list[str] | None = None,
+        lead_reciente: str | None = None,
+        nea_ultimo: str = "",
     ) -> None:
         self._ctx = ctx
+        # Lo que dijo el LEAD en lo reciente, sin lo que dijo Nea: para saber
+        # si él pidió una persona (ver `_handoff`). None ⇒ no se revisa.
+        self._lead_reciente = lead_reciente
+        # Lo último que dijo Nea (para saber si la factura fue su única pregunta).
+        self._nea_ultimo = nea_ultimo
+        self._busco_en_la_tienda = False
         # 038 — A qué etapas puede mover al lead (`lead.nextStages`).
         self.etapas: list[str] = list(etapas or [])
         # Lo último que se dijo en la conversación (app/dias.py). None ⇒ no
@@ -486,6 +616,9 @@ class ToolRuntime:
         self.routed_out = False
         self.proposed = False
         self.etapa_movida: str | None = None
+        # vocero-crm 067 — La cotización que el agente manda él mismo (compra
+        # directa); `finalize_reply` le pega el enlace y el total.
+        self.compra_directa: dict[str, Any] | None = None
 
     async def execute(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -511,6 +644,22 @@ class ToolRuntime:
                 return await self._reschedule_session(args)
             if name == "route_out":
                 return await self._route_out()
+            if name == "buscar_inventario" and self._ctx.settings.tienda_configurada:
+                self._busco_en_la_tienda = True
+                cantidad = args.get("cantidad")
+                resultado = await buscar_inventario(
+                    self._ctx.settings,
+                    str(args.get("consulta") or ""),
+                    cantidad if isinstance(cantidad, int) and cantidad > 0 else None,
+                )
+                # Preguntó por un producto: la tarjeta pasa a «Consulta de
+                # producto» si esa etapa va adelante (está en las siguientes).
+                etapa = next((e for e in self.etapas if e.strip().lower() == ETAPA_CONSULTA.lower()), None)
+                if etapa and self.etapa_movida is None and resultado.get("ok"):
+                    await self._mover(etapa)
+                return resultado
+            if name == "cotizar" and self._ctx.settings.tienda_configurada:
+                return await self._cotizar(args)
             if name == "handoff":
                 return self._handoff(args)
             logger.warning("tools: herramienta desconocida %r", name)
@@ -915,6 +1064,15 @@ class ToolRuntime:
         y Zoom, no de dónde es el enlace). Decir "Zoom" a quien le llegó un
         Meet es justo la clase de dato inventado que el agente no dice.
         """
+        cot = self.compra_directa
+        if cot:
+            # vocero-crm 067 — El enlace y el total los pone el código, no el
+            # modelo: un enlace mal copiado es una compra que no ocurre.
+            return (
+                f"{text}\n\nPara comprar: {cot['url']}\n"
+                f"Total: ${float(cot['totalEnlace']):,.2f} {cot['moneda']}, IVA incluido "
+                "(precio vigente al momento del pago)."
+            )
         data = self.booking_confirmation
         if not data:
             return text
@@ -987,8 +1145,151 @@ class ToolRuntime:
             out["instrucciones"] = "comparte estos recursos al despedirte, puerta abierta"
         return out
 
+    async def _mover(self, etapa: str, monto: tuple[int, str] | None = None) -> None:
+        """vocero-crm 067 — Mueve la tarjeta sin depender de que el modelo se
+        acuerde (en vivo no movía nada). El CRM decide si se puede: solo hacia
+        adelante, con `etapa` encendida; si no, no pasa nada."""
+        try:
+            data = await self._ctx.crm.move_stage(self._crm_conv_id, etapa, monto)
+            self.etapa_movida = ((data or {}).get("lead") or {}).get("stageName") or etapa
+        except CrmConflict as exc:
+            logger.info("tools: no se movió a %r: %s", etapa, exc.code)
+
+    async def _cotizar(self, args: dict[str, Any]) -> dict[str, Any]:
+        """vocero-crm 067 — Borrador de cotización para que una persona lo apruebe.
+
+        Orden: nota (el CRM la rechaza si `cotizar` está apagada o la IA en
+        pausa, y entonces no se escribe nada más) → ficha → etapa → handoff
+        después de la despedida. El enlace NUNCA vuelve al modelo: lo manda la
+        persona al aprobar (spec 067, D4).
+        """
+        if args.get("confirmado") is not True:
+            return {"ok": False, "error": "falta_confirmacion",
+                    "detalle": "repítele la lista (producto y cantidad) y espera su sí antes de cotizar"}
+        # El modelo se saltaba la pregunta y llenaba el campo a ojo (prueba en
+        # vivo del 2026-11-13). Se exige que la factura se haya hablado en lo
+        # último de la conversación, como `nombra_un_dia` con las fechas.
+        # Y que la respuesta sea de verdad suya: o el lead habló de la factura
+        # con sus palabras, o lo último de Nea fue SOLO esa pregunta. Con
+        # «¿confirmas la lista? ¿quieres factura?» un «sí» contesta la lista,
+        # no la factura (en vivo, el modelo la llenó a ojo).
+        if self._lead_reciente is None:
+            contestada = True
+        else:
+            pregunta_sola = bool(_HABLA_FACTURA.search(self._nea_ultimo)) and self._nea_ultimo.count("?") == 1
+            contestada = bool(_HABLA_FACTURA.search(self._lead_reciente)) or pregunta_sola
+        if not isinstance(args.get("requiere_cfdi"), bool) or not contestada:
+            return {"ok": False, "error": "falta_cfdi",
+                    "detalle": ("antes de cotizar pregúntale, en un mensaje solo para eso, si requiere "
+                                "factura (CFDI), sí o no, y espera su respuesta")}
+        lineas = [
+            (str((l or {}).get("producto") or "").strip(), (l or {}).get("cantidad"))
+            for l in args.get("lineas") or []
+        ]
+        lineas = [(p, c) for p, c in lineas if p and isinstance(c, int) and c > 0]
+        if not lineas or len(lineas) > MAX_LINEAS:
+            return {"ok": False, "error": "lineas_invalidas",
+                    "detalle": f"manda de 1 a {MAX_LINEAS} líneas, cada una con producto y cantidad"}
+
+        # Se resuelve AHORA contra la tienda: el modelo no guarda ids entre
+        # turnos, y la existencia pudo cambiar desde que armó la lista.
+        pedido: dict[str, int] = {}
+        por_id: dict[str, dict[str, Any]] = {}
+        for producto, cantidad in lineas:
+            resuelto = await resolver(self._ctx.settings, producto)
+            if resuelto is None:
+                return {"ok": False, "error": "tienda_no_disponible",
+                        "detalle": "no pude consultar la tienda; no inventes precios, ofrece pasarlo con una persona"}
+            estado, valor = resuelto
+            if estado == "ambiguo":
+                return {"ok": False, "error": "producto_ambiguo", "producto": producto, "opciones": valor,
+                        "detalle": "pregúntale cuál de estas es y vuelve a cotizar con su número de parte"}
+            if estado == "no_encontrado":
+                return {"ok": False, "error": "producto_no_encontrado", "producto": producto,
+                        "detalle": "no está en la tienda; díselo y pregúntale si lo quita o lo ve una persona"}
+            por_id[valor["id"]] = valor
+            pedido[valor["id"]] = pedido.get(valor["id"], 0) + cantidad
+        cot = armar_cotizacion(list(pedido.items()), por_id, self._ctx.settings.origen_del_carrito)
+        cot = {
+            "id": f"cot_{secrets.token_hex(6)}",
+            "creada": _iso_z(datetime.now(timezone.utc)),
+            **cot,
+            "cfdi": args["requiere_cfdi"],
+            "origen": "audio" if args.get("transcripcion_audio") else "texto",
+        }
+        cot["directa"] = es_compra_directa(cot, self._ctx.settings.compra_directa_max)
+
+        try:
+            await self._ctx.crm.post_note(self._crm_conv_id, texto_de_nota(cot, args.get("transcripcion_audio")))
+        except CrmConflict as exc:
+            return {"ok": False, "error": exc.code, "detalle": "no se pudo dejar la cotización; haz handoff"}
+        # La ficha del CRM solo guarda escalares cortos (listas y objetos los
+        # tira sin error): aquí va el resumen de la última, sin enlace. El
+        # historial completo de cotizaciones son las notas del hilo.
+        await self._ctx.crm.put_ficha(
+            self._crm_conv_id,
+            {"ultima_cotizacion": resumen_de_cotizacion(cot), "requiere_cfdi": cot["cfdi"]},
+        )
+        # El monto del trato = lo que se puede comprar ya (el total del
+        # enlace). Se pide aunque el lead ya esté en la etapa: una segunda
+        # cotización actualiza el monto (el CRM contesta `changed: false`).
+        monto = (round(float(cot["totalEnlace"]) * 100), cot["moneda"]) if cot.get("totalEnlace") else None
+        if cot["directa"]:
+            # Compra directa: todo se compra ya y no pasa del máximo. El
+            # enlace lo agrega `finalize_reply` tal cual; la IA sigue activa.
+            await self._mover(ETAPA_ENVIADA, monto)
+            self.compra_directa = cot
+            return {
+                "ok": True,
+                "compra_directa": True,
+                "productos": [l["titulo"] for l in cot["lineas"]],
+                "nota": (
+                    "listo: dile en una o dos líneas que ahí va su enlace para comprar y que puede "
+                    "pagar ahí mismo. NO escribas el enlace ni el total: se agregan solos al final "
+                    "de tu mensaje. Si pidió factura, dile que la solicita al pagar o con el equipo."
+                ),
+            }
+        await self._mover(ETAPA_COTIZACION, monto)
+        self.handoff_reason = "modelo"
+        return {
+            "ok": True,
+            "en_borrador": [l["titulo"] for l in cot["lineas"] if l["enEnlace"]],
+            "fuera_del_enlace": [{"producto": l["titulo"], "motivo": l["motivo"]} for l in cot["lineas"] if not l["enEnlace"]],
+            "nota": (
+                "listo, y la conversación ya pasa a una persona: despídete diciendo que una persona "
+                "revisa su cotización y se la confirma en breve. No ofrezcas pasarlo con nadie. "
+                "No menciones enlaces, totales ni cómo funciona por dentro. Si algo va sobre pedido "
+                "o a cotizar aparte, dilo en una línea con esas palabras."
+            ),
+        }
+
     def _handoff(self, args: dict[str, Any]) -> dict[str, Any]:
-        self.handoff_reason = str(args.get("reason") or "lead_request")
+        reason = str(args.get("reason") or "lead_request")
+        # vocero-crm 067 — Con tienda, un «el lead pidió una persona» que el
+        # lead no dijo se revisa antes de pausar la IA: en vivo, con un
+        # historial lleno de ofertas de pasarlo con alguien, el modelo tomó un
+        # «gracias» como petición y nunca buscó la pieza que le pedían. Pedir
+        # confirmación cuesta una vuelta; pasar a una persona a quien solo
+        # quería precio cuesta la venta.
+        if (
+            canonical_handoff_reason(reason) == "cliente"
+            and args.get("confirmado") is not True
+            and not self._busco_en_la_tienda
+            and self._lead_reciente is not None
+            and self._ctx.settings.tienda_configurada
+            and self._profile.permite("inventario")
+            and not _PIDE_PERSONA.search(self._lead_reciente)
+        ):
+            return {
+                "ok": False,
+                "error": "confirma_handoff",
+                "detalle": (
+                    "el lead no pidió una persona en sus mensajes. Si te preguntó por un producto "
+                    "o una pieza, búscalo con buscar_inventario y contéstale. Si de verdad quiere "
+                    "una persona (por ejemplo, aceptó tu oferta), vuelve a llamar handoff con confirmado=true."
+                ),
+            }
+        self.handoff_reason = reason
         return {
             "ok": True,
             "nota": (

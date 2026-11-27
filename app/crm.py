@@ -6,6 +6,7 @@ Endpoints:
   POST /api/bot/messages   {conversationId, text}   → 409 ai_paused|window_closed
   PUT  /api/bot/ficha      {conversationId, ficha}
   POST /api/bot/handoff    {conversationId, reason}
+  POST /api/bot/notes      {conversationId, texto}  → nota interna (solo con TIENDA)
   GET  /api/bot/availability?conversationId=&limit=&perDay=&days=
                                                     → huecos repartidos por día,
                                                       REGISTRADOS como la oferta
@@ -267,23 +268,49 @@ class CrmClient:
         data: dict[str, Any] = resp.json()
         return data
 
-    async def move_stage(self, conversation_id: str, stage: str) -> dict[str, Any]:
+    async def move_stage(
+        self,
+        conversation_id: str,
+        stage: str,
+        monto: tuple[int, str] | None = None,
+    ) -> dict[str, Any]:
         """038 — Mueve al lead a una etapa siguiente (`POST /api/bot/stage`).
 
         El 409 (`etapa_no_permitida`, `herramienta_apagada`, `ai_paused`) y el
         422 (`etapa_desconocida`) suben como `CrmConflict` con el sobre de
         error: su mensaje trae las etapas válidas, y es lo que el modelo
         necesita para corregirse en el mismo turno.
+
+        vocero-crm 067 — `monto` = (centavos, moneda): captura el monto del
+        trato en el mismo movimiento. Solo lo acepta un CRM con `TIENDA` y la
+        herramienta `cotizar` encendida.
         """
-        resp = await self._request(
-            "POST",
-            "/api/bot/stage",
-            json={"conversationId": conversation_id, "stage": stage},
-        )
+        cuerpo: dict[str, Any] = {"conversationId": conversation_id, "stage": stage}
+        if monto is not None:
+            cuerpo["amountCents"], cuerpo["currency"] = monto
+        resp = await self._request("POST", "/api/bot/stage", json=cuerpo)
         if resp.status_code in (409, 422):
             raise CrmConflict(_conflict_code(resp), _payload(resp))
         if resp.status_code != 200:
             raise CrmError(f"stage devolvió {resp.status_code}")
+        data: dict[str, Any] = resp.json()
+        return data
+
+    async def post_note(self, conversation_id: str, texto: str) -> dict[str, Any]:
+        """vocero-crm 067 — Nota interna en el hilo (`POST /api/bot/notes`).
+
+        Solo existe con la bandera `TIENDA` del CRM (si no, 404 vacío). El 409
+        (`herramienta_apagada`, `ai_paused`) sube como `CrmConflict`.
+        """
+        resp = await self._request(
+            "POST",
+            "/api/bot/notes",
+            json={"conversationId": conversation_id, "texto": texto},
+        )
+        if resp.status_code == 409:
+            raise CrmConflict(_conflict_code(resp), _payload(resp))
+        if resp.status_code != 201:
+            raise CrmError(f"notes devolvió {resp.status_code}")
         data: dict[str, Any] = resp.json()
         return data
 

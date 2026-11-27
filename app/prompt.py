@@ -402,6 +402,7 @@ def build_system_prompt(
     tz: ZoneInfo | None = None,
     recordatorios: bool = False,
     canal: str | None = None,
+    inventario: bool = False,
 ) -> str:
     """Chasis + perfil del negocio + bloque de contexto vivo de esta conversación.
 
@@ -487,6 +488,47 @@ def build_system_prompt(
             "nombre mejor describa dónde va; si dudas, la primera. NO lo muevas "
             "por un saludo, un «ok» o una duda suelta sin intención, ni a una "
             "etapa que ya pasó. Es interno: jamás se lo anuncies."
+        )
+    # vocero-crm 067 — Con tienda y la herramienta encendida. Lo que no debe
+    # soltar (el número exacto sin cantidad, el precio «a cotizar») ya no le
+    # llega desde app/tienda.py; aquí va cuándo usarla y cómo decirlo.
+    if inventario and profile.permite("inventario"):
+        lines.append(
+            "- Este negocio tiene tienda: cuando el lead pregunte si tienen un "
+            "producto, cuánto cuesta o si alcanza para una cantidad, llama "
+            "buscar_inventario en ESTE turno y contesta con lo que regrese; "
+            "jamás inventes existencias ni precios. Si regresa varios, "
+            "ofrécele esos (máximo 3) y pregúntale cuál es. Si un producto "
+            "viene con precio_a_cotizar, no le des precio: dile que ese se "
+            "cotiza aparte con una persona. Si un producto viene con "
+            "sobre_pedido, NO digas que no hay: se puede pedir, pero no hay "
+            "piezas en almacén, y el tiempo de entrega lo confirma una persona. "
+            "Si viene disponible en false, ese sí está agotado. "
+            "Los precios van en la moneda que "
+            "regresa e incluyen IVA. Si la tienda no responde o no encuentra "
+            "el producto, dilo con honestidad y ofrece pasarlo con una persona."
+        )
+        # En vivo (2026-11-13), con un historial donde Nea ya había ofrecido
+        # pasarlo con alguien, el modelo repitió la oferta en vez de buscar
+        # y tomó un «gracias» como que pidió una persona.
+        lines.append(
+            "- CADA VEZ que el lead pregunte por un producto o una pieza, busca "
+            "con buscar_inventario en ESE turno, aunque ya lo hayas buscado "
+            "antes o antes le hayas ofrecido pasarlo con alguien: lo que "
+            "dijiste antes no cuenta como búsqueda y las existencias cambian. "
+            "Por una pregunta de producto NO ofrezcas una persona sin haber "
+            "buscado primero."
+        )
+    if inventario and profile.permite("cotizar"):
+        lines.append(
+            "- Si el lead quiere cotización o comprar: (1) arma la lista con "
+            "buscar_inventario; (2) repítesela (producto y cantidad) y pregunta "
+            "«¿así está bien?»; (3) con su sí, en OTRO mensaje y como única "
+            "pregunta, pregúntale si requiere factura (CFDI), sí o no — RFC y "
+            "datos los pide la persona; (4) llama "
+            "cotizar y haz lo que te diga su resultado: o una persona revisa "
+            "su cotización, o va su enlace de compra. Tú nunca escribes un "
+            "enlace de compra ni el total: cuando toca, se agregan solos."
         )
     ficha = contact.get("ficha") or {}
     filled = {k: v for k, v in ficha.items() if v not in (None, "", [])}

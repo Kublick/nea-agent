@@ -432,6 +432,9 @@ class AppContext:
     crm: Any  # CrmClient
     llm: Any  # OpenAiLlm o fake con .complete()
     profile: Any | None = None  # ProfileProvider; None en tests = perfil mínimo
+    # vocero-crm 067 — Quién transcribe las notas de voz (app/stt.py, con
+    # STT_PROVIDER=modulate). None = el modelo que oye de `llm`.
+    stt: Any | None = None
     # Modo multi-organización: el registro de clientes por organización.
     # None fuera de ese modo — una Nea de un solo negocio no lo necesita, y
     # que sea None es lo que hace evidente en qué modo está corriendo.

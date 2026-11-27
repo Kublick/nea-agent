@@ -36,6 +36,7 @@ from app.multiorg import (
 from app.profile import ProfileProvider
 from app.sender import SenderWorker
 from app.state import AppContext
+from app.stt import ModulateStt, terminos_de
 from app.version import commit, version
 from app.webhook_retirado import router as webhook_retirado_router
 
@@ -221,6 +222,11 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 llm=_llm_del_arranque(settings, perfil),
                 profile=perfil,
                 registro=registro,
+                stt=(
+                    ModulateStt(settings.modulate_api_key.strip(), terminos_de(settings.modulate_terminos))
+                    if settings.usa_modulate
+                    else None
+                ),
             )
         c: AppContext = app.state.ctx
 

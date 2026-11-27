@@ -80,6 +80,42 @@ class Settings(BaseSettings):
     agent_timezone: str = "America/Mexico_City"
     brief_path: str = ""  # markdown local, fallback si el CRM no tiene perfil
 
+    # Tienda Shopify (vocero-crm 067, herramienta `inventario`). Las dos
+    # vacías = sin tienda: el modelo no ve `buscar_inventario`.
+    shopify_store_domain: str = ""  # p. ej. mi-tienda.myshopify.com
+    shopify_storefront_token: str = ""  # token PRIVADO de la Storefront API
+    # Origen del enlace de carrito de una cotización. Vacío = el dominio de
+    # Shopify; con el storefront propio publicado, su dominio.
+    cart_link_origin: str = ""
+    # Compra directa: si TODO lo cotizado se compra ya y el total no pasa de
+    # esto (en la moneda de la tienda), el agente manda el enlace él mismo.
+    # Lo demás lo aprueba una persona. 0 = siempre aprueba una persona.
+    compra_directa_max: float = 500.0
+
+    # Quién transcribe las notas de voz (vocero-crm 067, D15). Vacío = el
+    # modelo que oye del LLM (LLM_TRANSCRIBE_MODEL), como siempre.
+    # "modulate" = Velma de Modulate, con MODULATE_API_KEY.
+    stt_provider: str = ""
+    modulate_api_key: str = ""
+    # Vocabulario propio para Modulate, separado por comas: marcas y
+    # categorías de la tienda (lo que un STT general escribe mal).
+    modulate_terminos: str = ""
+
+    @property
+    def usa_modulate(self) -> bool:
+        return self.stt_provider.strip().lower() == "modulate" and bool(self.modulate_api_key.strip())
+
+    @property
+    def origen_del_carrito(self) -> str:
+        origen = self.cart_link_origin.strip().rstrip("/")
+        return origen or f"https://{self.shopify_store_domain.strip()}"
+
+    @property
+    def tienda_configurada(self) -> bool:
+        # Un `.env` copiado sin llenar trae los REEMPLAZA_: eso no es tienda.
+        valores = (self.shopify_store_domain.strip(), self.shopify_storefront_token.strip())
+        return all(v and not v.startswith("REEMPLAZA") for v in valores)
+
     # LLM
     # El proveedor del modelo no tiene por qué ser OpenAI, así que las
     # variables no llevan su nombre: llamarlas OPENAI_* apuntando a OpenRouter
